@@ -1,0 +1,676 @@
+//@version=6
+indicator("SMC Pro - Calisto FX Model [MTF]", overlay=true, max_lines_count=150, max_boxes_count=20, max_labels_count=150)
+
+// ================================================================
+//  SMC PRO - MULTI TIMEFRAME VERSION
+//
+//  BSL/SSL LEVELS shown from 4 timeframes:
+//    1D  = Gold  solid  thick   (most important)
+//    4H  = Orange dashed medium
+//    1H  = Purple dashed thin
+//    15M = Red/Cyan dotted thin (entry level)
+//
+//  SWEEP DETECTION on all 4 TFs - labelled by TF
+//  SIGNAL: 15M sweep -> OB/FVG entry -> candle confirm
+//  Higher TF sweep on same bar = stronger confluence
+// ================================================================
+
+// -- INPUTS -------------------------------------------------------
+swingLen   = input.int(15,    "15M Swing Length",        minval=5,   maxval=50,  group="Structure")
+obLookback = input.int(5,     "OB Lookback",             minval=1,   maxval=20,  group="Order Blocks")
+dispMult   = input.float(1.5, "OB Displacement (ATR x)", minval=0.5, maxval=5.0, step=0.1, group="Order Blocks")
+fvgMinSize = input.float(0.5, "FVG Min Size (ATR x)",    minval=0.1, maxval=3.0, step=0.1, group="Fair Value Gaps")
+htfTF      = input.timeframe("60", "HTF Bias Timeframe",                          group="HTF Bias")
+sweepWin   = input.int(60,    "15M Sweep Window (bars)", minval=10,  maxval=200, group="Signal")
+cooldown   = input.int(10,    "Signal Cooldown (bars)",  minval=1,   maxval=50,  group="Signal")
+candleBody = input.float(0.45,"Min Candle Body %",       minval=0.2, maxval=0.9, step=0.05, group="Signal")
+useTrend   = input.bool(true, "Trend Filter",                                     group="Signal")
+useKZ      = input.bool(false,"Kill Zone Filter",                                 group="Signal")
+show1D     = input.bool(true, "Show 1D BSL/SSL",                                  group="MTF Levels")
+show4H     = input.bool(true, "Show 4H BSL/SSL",                                  group="MTF Levels")
+show1H     = input.bool(true, "Show 1H BSL/SSL",                                  group="MTF Levels")
+show15M    = input.bool(true, "Show 15M BSL/SSL",                                 group="MTF Levels")
+showKZ     = input.bool(true, "Show Kill Zones",                                   group="Display")
+showAsian  = input.bool(true, "Show Asian Range",                                  group="Display")
+showDOL    = input.bool(true, "Show Draw on Liquidity",                            group="Display")
+
+// -- CORE ---------------------------------------------------------
+atr     = ta.atr(14)
+atrSlow = ta.atr(50)
+
+// -- HTF BIAS (EMA50 vs EMA200) -----------------------------------
+htfEMA50  = request.security(syminfo.tickerid, htfTF, ta.ema(close, 50),  lookahead=barmerge.lookahead_off)
+htfEMA200 = request.security(syminfo.tickerid, htfTF, ta.ema(close, 200), lookahead=barmerge.lookahead_off)
+htfClose  = request.security(syminfo.tickerid, htfTF, close,              lookahead=barmerge.lookahead_off)
+htfBull   = htfEMA50 > htfEMA200 and htfClose > htfEMA50
+htfBear   = htfEMA50 < htfEMA200 and htfClose < htfEMA50
+htfBias   = htfBull ? 1 : htfBear ? -1 : 0
+
+// -- TREND FILTER -------------------------------------------------
+isTrending = atr > atrSlow * 0.75
+
+// -- MARKET STRUCTURE (15M MSS only) ------------------------------
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow (low,  swingLen, swingLen)
+
+var float lastHH   = na
+var float lastLL   = na
+var bool  bullBias = true
+var label mssUpLbl = na
+var label mssDnLbl = na
+
+if not na(ph)
+    lastHH := ph
+if not na(pl)
+    lastLL := pl
+
+bosUp     = not na(lastHH) and close > lastHH and close[1] <= lastHH
+bosDown   = not na(lastLL) and close < lastLL and close[1] >= lastLL
+chochUp   = not na(lastHH) and close > lastHH and not bullBias
+chochDown = not na(lastLL) and close < lastLL and bullBias
+
+if bosUp or chochUp
+    bullBias := true
+if bosDown or chochDown
+    bullBias := false
+
+if chochUp and not bosUp
+    label.delete(mssUpLbl)
+    mssUpLbl := label.new(bar_index, low - atr * 0.6, "MSS ^", color=color.new(#00c853, 0), textcolor=color.white, style=label.style_label_up, size=size.small)
+
+if chochDown and not bosDown
+    label.delete(mssDnLbl)
+    mssDnLbl := label.new(bar_index, high + atr * 0.6, "MSS v", color=color.new(#d50000, 0), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+// ================================================================
+//  MTF BSL / SSL LEVELS
+//  Each TF: ONE BSL line + ONE SSL line (deleted on new pivot)
+//  Color / style by importance:
+//    1D  = Gold   (#FFD700) solid  width 3
+//    4H  = Orange (#FF6D00) dashed width 2
+//    1H  = Purple (#9C27B0) dashed width 1
+//    15M = Red/Cyan         dotted width 1
+// ================================================================
+
+// ---- 1D ---------------------------------------------------------
+d1PH = request.security(syminfo.tickerid, "D",   ta.pivothigh(high, 3, 3), lookahead=barmerge.lookahead_off)
+d1PL = request.security(syminfo.tickerid, "D",   ta.pivotlow (low,  3, 3), lookahead=barmerge.lookahead_off)
+
+var float d1BSL     = na
+var float d1SSL     = na
+var float prevD1BSL = na
+var float prevD1SSL = na
+var bool  sweptD1BSL = false
+var bool  sweptD1SSL = false
+var line  d1BSLLine = na
+var line  d1SSLLine = na
+var label d1BSLLbl  = na
+var label d1SSLLbl  = na
+
+if not na(d1PH)
+    d1BSL    := d1PH
+    prevD1BSL := d1PH
+    sweptD1BSL := false
+    if show1D
+        line.delete(d1BSLLine)
+        label.delete(d1BSLLbl)
+        d1BSLLine := line.new(bar_index, d1PH, bar_index + 120, d1PH, color=color.new(#FFD700, 0), style=line.style_solid, width=3)
+        d1BSLLbl  := label.new(bar_index + 5, d1PH + atr * 0.4, "1D BSL", color=color.new(#FFD700, 10), textcolor=color.black, style=label.style_label_right, size=size.small)
+
+if not na(d1PL)
+    d1SSL    := d1PL
+    prevD1SSL := d1PL
+    sweptD1SSL := false
+    if show1D
+        line.delete(d1SSLLine)
+        label.delete(d1SSLLbl)
+        d1SSLLine := line.new(bar_index, d1PL, bar_index + 120, d1PL, color=color.new(#FFD700, 0), style=line.style_solid, width=3)
+        d1SSLLbl  := label.new(bar_index + 5, d1PL - atr * 0.4, "1D SSL", color=color.new(#FFD700, 10), textcolor=color.black, style=label.style_label_right, size=size.small)
+
+// ---- 4H ---------------------------------------------------------
+h4PH = request.security(syminfo.tickerid, "240", ta.pivothigh(high, 5, 5), lookahead=barmerge.lookahead_off)
+h4PL = request.security(syminfo.tickerid, "240", ta.pivotlow (low,  5, 5), lookahead=barmerge.lookahead_off)
+
+var float h4BSL     = na
+var float h4SSL     = na
+var float prevH4BSL = na
+var float prevH4SSL = na
+var bool  sweptH4BSL = false
+var bool  sweptH4SSL = false
+var line  h4BSLLine = na
+var line  h4SSLLine = na
+var label h4BSLLbl  = na
+var label h4SSLLbl  = na
+
+if not na(h4PH)
+    h4BSL    := h4PH
+    prevH4BSL := h4PH
+    sweptH4BSL := false
+    if show4H
+        line.delete(h4BSLLine)
+        label.delete(h4BSLLbl)
+        h4BSLLine := line.new(bar_index, h4PH, bar_index + 120, h4PH, color=color.new(#FF6D00, 0), style=line.style_dashed, width=2)
+        h4BSLLbl  := label.new(bar_index + 5, h4PH + atr * 0.3, "4H BSL", color=color.new(#FF6D00, 10), textcolor=color.white, style=label.style_label_right, size=size.small)
+
+if not na(h4PL)
+    h4SSL    := h4PL
+    prevH4SSL := h4PL
+    sweptH4SSL := false
+    if show4H
+        line.delete(h4SSLLine)
+        label.delete(h4SSLLbl)
+        h4SSLLine := line.new(bar_index, h4PL, bar_index + 120, h4PL, color=color.new(#FF6D00, 0), style=line.style_dashed, width=2)
+        h4SSLLbl  := label.new(bar_index + 5, h4PL - atr * 0.3, "4H SSL", color=color.new(#FF6D00, 10), textcolor=color.white, style=label.style_label_right, size=size.small)
+
+// ---- 1H ---------------------------------------------------------
+h1PH = request.security(syminfo.tickerid, "60",  ta.pivothigh(high, 8, 8), lookahead=barmerge.lookahead_off)
+h1PL = request.security(syminfo.tickerid, "60",  ta.pivotlow (low,  8, 8), lookahead=barmerge.lookahead_off)
+
+var float h1BSL     = na
+var float h1SSL     = na
+var float prevH1BSL = na
+var float prevH1SSL = na
+var bool  sweptH1BSL = false
+var bool  sweptH1SSL = false
+var line  h1BSLLine = na
+var line  h1SSLLine = na
+var label h1BSLLbl  = na
+var label h1SSLLbl  = na
+
+if not na(h1PH)
+    h1BSL    := h1PH
+    prevH1BSL := h1PH
+    sweptH1BSL := false
+    if show1H
+        line.delete(h1BSLLine)
+        label.delete(h1BSLLbl)
+        h1BSLLine := line.new(bar_index, h1PH, bar_index + 120, h1PH, color=color.new(#9C27B0, 0), style=line.style_dashed, width=1)
+        h1BSLLbl  := label.new(bar_index + 5, h1PH + atr * 0.2, "1H BSL", color=color.new(#9C27B0, 10), textcolor=color.white, style=label.style_label_right, size=size.small)
+
+if not na(h1PL)
+    h1SSL    := h1PL
+    prevH1SSL := h1PL
+    sweptH1SSL := false
+    if show1H
+        line.delete(h1SSLLine)
+        label.delete(h1SSLLbl)
+        h1SSLLine := line.new(bar_index, h1PL, bar_index + 120, h1PL, color=color.new(#9C27B0, 0), style=line.style_dashed, width=1)
+        h1SSLLbl  := label.new(bar_index + 5, h1PL - atr * 0.2, "1H SSL", color=color.new(#9C27B0, 10), textcolor=color.white, style=label.style_label_right, size=size.small)
+
+// ---- 15M --------------------------------------------------------
+liqPH = ta.pivothigh(high, swingLen, swingLen)
+liqPL = ta.pivotlow (low,  swingLen, swingLen)
+
+var float bslLevel = na
+var float sslLevel = na
+var float prevBSL  = na
+var float prevSSL  = na
+var line  bslLine  = na
+var line  sslLine  = na
+var label bslLbl   = na
+var label sslLbl   = na
+
+if not na(liqPH)
+    bslLevel := liqPH
+    if show15M
+        line.delete(bslLine)
+        label.delete(bslLbl)
+        bslLine := line.new(bar_index[swingLen], liqPH, bar_index + 60, liqPH, color=color.new(#ff5252, 40), style=line.style_dotted, width=2)
+        bslLbl  := label.new(bar_index[swingLen], liqPH + atr * 0.15, "15M BSL", color=color.new(#ff5252, 20), textcolor=color.white, style=label.style_label_right, size=size.tiny)
+
+if not na(liqPL)
+    sslLevel := liqPL
+    if show15M
+        line.delete(sslLine)
+        label.delete(sslLbl)
+        sslLine := line.new(bar_index[swingLen], liqPL, bar_index + 60, liqPL, color=color.new(#00e5ff, 40), style=line.style_dotted, width=2)
+        sslLbl  := label.new(bar_index[swingLen], liqPL - atr * 0.15, "15M SSL", color=color.new(#00e5ff, 20), textcolor=color.white, style=label.style_label_right, size=size.tiny)
+
+// ================================================================
+//  MTF SWEEP DETECTION
+//  Pattern: check sweep -> update prev -> mark swept so it only
+//  fires ONCE per level (resets when new pivot forms)
+//  Label offsets staggered so they don't overlap:
+//    1D  = atr * 2.5
+//    4H  = atr * 1.8
+//    1H  = atr * 1.2
+//    15M = atr * 0.7
+// ================================================================
+
+// ---- 1D sweeps --------------------------------------------------
+var label sw1DBSLLbl = na
+var label sw1DSSLLbl = na
+
+sw1DBSL = not na(prevD1BSL) and high > prevD1BSL and close < prevD1BSL and not sweptD1BSL and barstate.isconfirmed
+sw1DSSL = not na(prevD1SSL) and low  < prevD1SSL and close > prevD1SSL and not sweptD1SSL and barstate.isconfirmed
+
+if sw1DBSL
+    sweptD1BSL := true
+    label.delete(sw1DBSLLbl)
+    sw1DBSLLbl := label.new(bar_index, high + atr * 2.5, "1D BSL SWEPT", color=color.new(#FFD700, 0), textcolor=color.black, style=label.style_label_down, size=size.normal)
+
+if sw1DSSL
+    sweptD1SSL := true
+    label.delete(sw1DSSLLbl)
+    sw1DSSLLbl := label.new(bar_index, low - atr * 2.5, "1D SSL SWEPT", color=color.new(#FFD700, 0), textcolor=color.black, style=label.style_label_up, size=size.normal)
+
+// ---- 4H sweeps --------------------------------------------------
+var label sw4HBSLLbl = na
+var label sw4HSSLLbl = na
+
+sw4HBSL = not na(prevH4BSL) and high > prevH4BSL and close < prevH4BSL and not sweptH4BSL and barstate.isconfirmed
+sw4HSSL = not na(prevH4SSL) and low  < prevH4SSL and close > prevH4SSL and not sweptH4SSL and barstate.isconfirmed
+
+if sw4HBSL
+    sweptH4BSL := true
+    label.delete(sw4HBSLLbl)
+    sw4HBSLLbl := label.new(bar_index, high + atr * 1.8, "4H BSL SWEPT", color=color.new(#FF6D00, 0), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+if sw4HSSL
+    sweptH4SSL := true
+    label.delete(sw4HSSLLbl)
+    sw4HSSLLbl := label.new(bar_index, low - atr * 1.8, "4H SSL SWEPT", color=color.new(#FF6D00, 0), textcolor=color.white, style=label.style_label_up, size=size.small)
+
+// ---- 1H sweeps --------------------------------------------------
+var label sw1HBSLLbl = na
+var label sw1HSSLLbl = na
+
+sw1HBSL = not na(prevH1BSL) and high > prevH1BSL and close < prevH1BSL and not sweptH1BSL and barstate.isconfirmed
+sw1HSSL = not na(prevH1SSL) and low  < prevH1SSL and close > prevH1SSL and not sweptH1SSL and barstate.isconfirmed
+
+if sw1HBSL
+    sweptH1BSL := true
+    label.delete(sw1HBSLLbl)
+    sw1HBSLLbl := label.new(bar_index, high + atr * 1.2, "1H BSL SWEPT", color=color.new(#9C27B0, 0), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+if sw1HSSL
+    sweptH1SSL := true
+    label.delete(sw1HSSLLbl)
+    sw1HSSLLbl := label.new(bar_index, low - atr * 1.2, "1H SSL SWEPT", color=color.new(#9C27B0, 0), textcolor=color.white, style=label.style_label_up, size=size.small)
+
+// ---- 15M sweeps (entry trigger) ---------------------------------
+sweepBSL = not na(prevBSL) and high > prevBSL and close < prevBSL
+sweepSSL = not na(prevSSL) and low  < prevSSL and close > prevSSL
+
+if not na(liqPH)
+    prevBSL := liqPH
+if not na(liqPL)
+    prevSSL := liqPL
+
+var bool  step1Buy     = false
+var bool  step1Sell    = false
+var int   step1BuyBar  = 0
+var int   step1SellBar = 0
+var label sw15MBuyLbl  = na
+var label sw15MSellLbl = na
+
+if sweepSSL
+    step1Buy      := true
+    step1Sell     := false
+    step1BuyBar   := bar_index
+    label.delete(sw15MBuyLbl)
+    sw15MBuyLbl := label.new(bar_index, low - atr * 0.7, "15M SSL SWEPT", color=color.new(#00e5ff, 0), textcolor=color.black, style=label.style_label_up, size=size.tiny)
+
+if sweepBSL
+    step1Sell     := true
+    step1Buy      := false
+    step1SellBar  := bar_index
+    label.delete(sw15MSellLbl)
+    sw15MSellLbl := label.new(bar_index, high + atr * 0.7, "15M BSL SWEPT", color=color.new(#ff5252, 0), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+
+if bar_index - step1BuyBar  > sweepWin
+    step1Buy  := false
+if bar_index - step1SellBar > sweepWin
+    step1Sell := false
+
+// ================================================================
+//  DRAW ON LIQUIDITY - points to nearest HTF level in bias direction
+// ================================================================
+var line  dolLine  = na
+var label dolLabel = na
+
+if showDOL and barstate.islast
+    line.delete(dolLine)
+    label.delete(dolLabel)
+    dolLvl = float(na)
+    if bullBias
+        if not na(h1BSL) and h1BSL > close
+            dolLvl := h1BSL
+        if not na(h4BSL) and h4BSL > close and (na(dolLvl) or h4BSL < dolLvl)
+            dolLvl := h4BSL
+        if not na(d1BSL) and d1BSL > close and (na(dolLvl) or d1BSL < dolLvl)
+            dolLvl := d1BSL
+        if na(dolLvl) and not na(bslLevel)
+            dolLvl := bslLevel
+    else
+        if not na(h1SSL) and h1SSL < close
+            dolLvl := h1SSL
+        if not na(h4SSL) and h4SSL < close and (na(dolLvl) or h4SSL > dolLvl)
+            dolLvl := h4SSL
+        if not na(d1SSL) and d1SSL < close and (na(dolLvl) or d1SSL > dolLvl)
+            dolLvl := d1SSL
+        if na(dolLvl) and not na(sslLevel)
+            dolLvl := sslLevel
+    if not na(dolLvl)
+        dolLine  := line.new(bar_index - 5, dolLvl, bar_index + 30, dolLvl, color=color.new(color.yellow, 0), style=line.style_dashed, width=2)
+        dolLabel := label.new(bar_index + 32, dolLvl, "DOL", color=color.new(color.yellow, 10), textcolor=color.black, style=label.style_label_left, size=size.small)
+
+// ================================================================
+//  ORDER BLOCKS (15M, structure-aligned, ONE per direction)
+// ================================================================
+var float bullOBH   = na
+var float bullOBL   = na
+var box   bullOBBox = na
+var label bullOBLbl = na
+var float bearOBH   = na
+var float bearOBL   = na
+var box   bearOBBox = na
+var label bearOBLbl = na
+
+strongBull = (close - open) > atr * dispMult and close > open and bullBias
+strongBear = (open - close) > atr * dispMult and close < open and not bullBias
+
+if not na(bullOBL) and close < bullOBL
+    box.delete(bullOBBox)
+    label.delete(bullOBLbl)
+    bullOBH := na
+    bullOBL := na
+    bullOBBox := na
+    bullOBLbl := na
+
+if not na(bearOBH) and close > bearOBH
+    box.delete(bearOBBox)
+    label.delete(bearOBLbl)
+    bearOBH := na
+    bearOBL := na
+    bearOBBox := na
+    bearOBLbl := na
+
+if strongBull
+    for i = 1 to obLookback
+        if close[i] < open[i]
+            box.delete(bullOBBox)
+            label.delete(bullOBLbl)
+            bullOBH   := high[i]
+            bullOBL   := low[i]
+            bullOBBox := box.new(bar_index[i], high[i], bar_index + 200, low[i], border_color=color.new(#2962FF, 0), bgcolor=color.new(#2962FF, 82), border_width=1)
+            bullOBLbl := label.new(bar_index[i], low[i] - atr * 0.4, "Bull OB", color=color.new(#2962FF, 0), textcolor=color.white, style=label.style_label_up, size=size.small)
+            break
+
+if strongBear
+    for i = 1 to obLookback
+        if close[i] > open[i]
+            box.delete(bearOBBox)
+            label.delete(bearOBLbl)
+            bearOBH   := high[i]
+            bearOBL   := low[i]
+            bearOBBox := box.new(bar_index[i], high[i], bar_index + 200, low[i], border_color=color.new(#FF6D00, 0), bgcolor=color.new(#FF6D00, 82), border_width=1)
+            bearOBLbl := label.new(bar_index[i], high[i] + atr * 0.4, "Bear OB", color=color.new(#FF6D00, 0), textcolor=color.white, style=label.style_label_down, size=size.small)
+            break
+
+// ================================================================
+//  FAIR VALUE GAPS (15M, structure-aligned, ONE per direction)
+// ================================================================
+var float bullFVGH   = na
+var float bullFVGL   = na
+var box   bullFVGBox = na
+var label bullFVGLbl = na
+var float bearFVGH   = na
+var float bearFVGL   = na
+var box   bearFVGBox = na
+var label bearFVGLbl = na
+
+midBullDisp = close[1] > open[1] and (close[1] - open[1]) > atr * 0.8
+midBearDisp = close[1] < open[1] and (open[1] - close[1]) > atr * 0.8
+bullFVGSize = low    - high[2]
+bearFVGSize = low[2] - high
+bullFVGcond = low > high[2] and bullFVGSize > atr * fvgMinSize and midBullDisp and bullBias
+bearFVGcond = high < low[2] and bearFVGSize > atr * fvgMinSize and midBearDisp and not bullBias
+
+if not na(bullFVGL) and close < bullFVGL
+    box.delete(bullFVGBox)
+    label.delete(bullFVGLbl)
+    bullFVGH := na
+    bullFVGL := na
+    bullFVGBox := na
+    bullFVGLbl := na
+
+if not na(bearFVGH) and close > bearFVGH
+    box.delete(bearFVGBox)
+    label.delete(bearFVGLbl)
+    bearFVGH := na
+    bearFVGL := na
+    bearFVGBox := na
+    bearFVGLbl := na
+
+if bullFVGcond
+    box.delete(bullFVGBox)
+    label.delete(bullFVGLbl)
+    bullFVGH   := low
+    bullFVGL   := high[2]
+    bullFVGBox := box.new(bar_index - 2, low, bar_index + 200, high[2], border_color=color.new(#00c853, 0), bgcolor=color.new(#00c853, 82), border_width=1)
+    bullFVGLbl := label.new(bar_index, (low + high[2]) / 2, "FVG", color=color.new(#00c853, 0), textcolor=color.white, style=label.style_label_right, size=size.small)
+
+if bearFVGcond
+    box.delete(bearFVGBox)
+    label.delete(bearFVGLbl)
+    bearFVGH   := low[2]
+    bearFVGL   := high
+    bearFVGBox := box.new(bar_index - 2, low[2], bar_index + 200, high, border_color=color.new(#ff5252, 0), bgcolor=color.new(#ff5252, 82), border_width=1)
+    bearFVGLbl := label.new(bar_index, (low[2] + high) / 2, "FVG", color=color.new(#ff5252, 0), textcolor=color.white, style=label.style_label_right, size=size.small)
+
+// ================================================================
+//  KILL ZONES + SILVER BULLET (UTC)
+// ================================================================
+barTimeM = hour(time, "UTC") * 60 + minute(time, "UTC")
+londonKZ = barTimeM >= 420 and barTimeM < 600
+nyKZ     = barTimeM >= 720 and barTimeM < 900
+sb1      = barTimeM >= 480 and barTimeM < 540
+sb2      = barTimeM >= 900 and barTimeM < 960
+inKZ     = londonKZ or nyKZ
+
+bgcolor(showKZ and londonKZ and not sb1 ? color.new(#1565c0, 93) : na, title="London KZ")
+bgcolor(showKZ and nyKZ     and not sb2 ? color.new(#6a1b9a, 93) : na, title="NY KZ")
+bgcolor(showKZ and (sb1 or sb2)         ? color.new(#00bcd4, 88) : na, title="Silver Bullet")
+
+// ================================================================
+//  ASIAN RANGE (00:00-07:00 UTC)
+// ================================================================
+asianSess = barTimeM >= 0 and barTimeM < 420
+
+var float asianH      = na
+var float asianL      = na
+var bool  asianActive = false
+var line  asianHLine  = na
+var line  asianLLine  = na
+var label asianHLbl   = na
+var label asianLLbl   = na
+
+if asianSess
+    if not asianActive
+        asianH      := high
+        asianL      := low
+        asianActive := true
+    else
+        asianH := math.max(asianH, high)
+        asianL := math.min(asianL, low)
+else
+    if asianActive
+        asianActive := false
+        if showAsian
+            line.delete(asianHLine)
+            line.delete(asianLLine)
+            label.delete(asianHLbl)
+            label.delete(asianLLbl)
+            asianHLine := line.new(bar_index, asianH, bar_index + 80, asianH, color=color.new(color.orange, 20), style=line.style_dashed, width=1)
+            asianLLine := line.new(bar_index, asianL, bar_index + 80, asianL, color=color.new(color.orange, 20), style=line.style_dashed, width=1)
+            asianHLbl  := label.new(bar_index, asianH + atr * 0.3, "Asian H", color=color.new(color.orange, 10), textcolor=color.white, style=label.style_label_right, size=size.tiny)
+            asianLLbl  := label.new(bar_index, asianL - atr * 0.3, "Asian L", color=color.new(color.orange, 10), textcolor=color.white, style=label.style_label_right, size=size.tiny)
+
+// ================================================================
+//  ZONE CHECK + CANDLE CONFIRMATION
+// ================================================================
+inBullOB  = not na(bullOBH)  and low  <= bullOBH  and low  >= bullOBL
+inBullFVG = not na(bullFVGH) and low  <= bullFVGH and low  >= bullFVGL
+inBearOB  = not na(bearOBH)  and high >= bearOBL  and high <= bearOBH
+inBearFVG = not na(bearFVGH) and high >= bearFVGL and high <= bearFVGH
+inBullZone = inBullOB or inBullFVG
+inBearZone = inBearOB or inBearFVG
+
+bodyPct    = math.abs(close - open) / math.max(high - low, 0.0001)
+bullCandle = close > open and bodyPct >= candleBody
+bearCandle = close < open and bodyPct >= candleBody
+
+// ================================================================
+//  SIGNAL + ALL FILTERS
+// ================================================================
+var int lastBuyBar  = 0
+var int lastSellBar = 0
+
+kzOk     = useKZ ? inKZ : true
+trendOk  = useTrend ? isTrending : true
+cdBuyOk  = bar_index - lastBuyBar  > cooldown
+cdSellOk = bar_index - lastSellBar > cooldown
+
+buySignal  = step1Buy  and inBullZone and bullCandle and bullBias and htfBias >= 0 and trendOk and kzOk and cdBuyOk  and barstate.isconfirmed
+sellSignal = step1Sell and inBearZone and bearCandle and not bullBias and htfBias <= 0 and trendOk and kzOk and cdSellOk and barstate.isconfirmed
+
+// HTF confluence score (how many HTF levels swept in same direction)
+htfConfBuy  = (sw1DSSL ? 1 : 0) + (sw4HSSL ? 1 : 0) + (sw1HSSL ? 1 : 0)
+htfConfSell = (sw1DBSL ? 1 : 0) + (sw4HBSL ? 1 : 0) + (sw1HBSL ? 1 : 0)
+
+// ================================================================
+//  ENTRY / SL / TP
+// ================================================================
+var line entryLine = na
+var line slLine    = na
+var line tpLine    = na
+
+if buySignal
+    lastBuyBar := bar_index
+    step1Buy   := false
+    entryPr = close
+    slPr = not na(bullOBL) ? math.round(bullOBL - atr * 0.2, 2) : not na(bullFVGL) ? math.round(bullFVGL - atr * 0.2, 2) : math.round(entryPr - atr * 1.5, 2)
+    tpLvl = not na(h1BSL) and h1BSL > entryPr ? h1BSL : not na(h4BSL) and h4BSL > entryPr ? h4BSL : not na(d1BSL) and d1BSL > entryPr ? d1BSL : not na(bslLevel) and bslLevel > entryPr ? bslLevel : entryPr + atr * 3.0
+    tpPr = math.round(tpLvl, 2)
+    risk = math.max(entryPr - slPr, atr * 0.1)
+    rr   = math.round((tpPr - entryPr) / risk, 1)
+    conf = htfConfBuy > 0 ? " [" + str.tostring(htfConfBuy) + "x HTF]" : ""
+    label.new(bar_index, low - atr * 3.5, "BUY" + conf + "\nEntry " + str.tostring(math.round(entryPr, 2)) + "\nSL    " + str.tostring(slPr) + "\nTP    " + str.tostring(tpPr) + "\nRR 1:" + str.tostring(rr), color=color.new(#00c853, 0), textcolor=color.white, style=label.style_label_up, size=size.normal)
+    line.delete(entryLine)
+    line.delete(slLine)
+    line.delete(tpLine)
+    entryLine := line.new(bar_index, entryPr, bar_index + 50, entryPr, color=#00c853, width=2)
+    slLine    := line.new(bar_index, slPr,    bar_index + 50, slPr,    color=#ff5252, width=1, style=line.style_dashed)
+    tpLine    := line.new(bar_index, tpPr,    bar_index + 50, tpPr,    color=color.lime, width=1, style=line.style_dashed)
+
+if sellSignal
+    lastSellBar := bar_index
+    step1Sell   := false
+    entryPr = close
+    slPr = not na(bearOBH) ? math.round(bearOBH + atr * 0.2, 2) : not na(bearFVGH) ? math.round(bearFVGH + atr * 0.2, 2) : math.round(entryPr + atr * 1.5, 2)
+    tpLvl = not na(h1SSL) and h1SSL < entryPr ? h1SSL : not na(h4SSL) and h4SSL < entryPr ? h4SSL : not na(d1SSL) and d1SSL < entryPr ? d1SSL : not na(sslLevel) and sslLevel < entryPr ? sslLevel : entryPr - atr * 3.0
+    tpPr = math.round(tpLvl, 2)
+    risk = math.max(slPr - entryPr, atr * 0.1)
+    rr   = math.round((entryPr - tpPr) / risk, 1)
+    conf = htfConfSell > 0 ? " [" + str.tostring(htfConfSell) + "x HTF]" : ""
+    label.new(bar_index, high + atr * 3.5, "SELL" + conf + "\nEntry " + str.tostring(math.round(entryPr, 2)) + "\nSL    " + str.tostring(slPr) + "\nTP    " + str.tostring(tpPr) + "\nRR 1:" + str.tostring(rr), color=color.new(#d50000, 0), textcolor=color.white, style=label.style_label_down, size=size.normal)
+    line.delete(entryLine)
+    line.delete(slLine)
+    line.delete(tpLine)
+    entryLine := line.new(bar_index, entryPr, bar_index + 50, entryPr, color=#d50000, width=2)
+    slLine    := line.new(bar_index, slPr,    bar_index + 50, slPr,    color=#ff5252, width=1, style=line.style_dashed)
+    tpLine    := line.new(bar_index, tpPr,    bar_index + 50, tpPr,    color=color.lime, width=1, style=line.style_dashed)
+
+plotshape(buySignal,  "BUY",  shape.triangleup,   location.belowbar, color.new(#00c853, 0), size=size.large)
+plotshape(sellSignal, "SELL", shape.triangledown, location.abovebar, color.new(#d50000, 0), size=size.large)
+
+// ================================================================
+//  DASHBOARD
+// ================================================================
+var table dash = table.new(position.top_right, 3, 14, bgcolor=color.new(#0d1117, 5), border_color=color.new(#30363d, 0), border_width=1, frame_color=color.new(#30363d, 0), frame_width=1)
+
+if barstate.islast
+    htfStr = htfBias == 1 ? "BULL OK" : htfBias == -1 ? "BEAR OK" : "NEUTRAL"
+    htfCol = htfBias == 1 ? color.new(#00e5ff, 0) : htfBias == -1 ? color.new(#ff5252, 0) : color.gray
+
+    table.cell(dash, 0, 0, "SMC MTF",   text_color=color.white,           bgcolor=color.new(#161b22, 0), text_size=size.small)
+    table.cell(dash, 1, 0, "BUY",       text_color=color.new(#00c853, 0), bgcolor=color.new(#161b22, 0), text_size=size.small)
+    table.cell(dash, 2, 0, "SELL",      text_color=color.new(#ff5252, 0), bgcolor=color.new(#161b22, 0), text_size=size.small)
+
+    table.cell(dash, 0, 1, "HTF Bias",  text_color=color.new(#8b949e, 0), text_size=size.small)
+    table.cell(dash, 1, 1, htfBias >= 0 ? htfStr : "-", text_color=htfCol, text_size=size.small)
+    table.cell(dash, 2, 1, htfBias <= 0 ? htfStr : "-", text_color=htfCol, text_size=size.small)
+
+    table.cell(dash, 0, 2, "Structure", text_color=color.new(#8b949e, 0), text_size=size.small)
+    table.cell(dash, 1, 2, bullBias ? "BULL OK" : "-",     text_color=bullBias ? color.new(#00c853, 0) : color.new(#8b949e, 0), text_size=size.small)
+    table.cell(dash, 2, 2, not bullBias ? "BEAR OK" : "-", text_color=not bullBias ? color.new(#ff5252, 0) : color.new(#8b949e, 0), text_size=size.small)
+
+    table.cell(dash, 0, 3, "1D Sweep",  text_color=color.new(#FFD700, 0), text_size=size.small)
+    table.cell(dash, 1, 3, sweptD1SSL ? "1D SSL" : "-", text_color=sweptD1SSL ? color.new(#FFD700, 0) : color.new(#8b949e, 0), text_size=size.small)
+    table.cell(dash, 2, 3, sweptD1BSL ? "1D BSL" : "-", text_color=sweptD1BSL ? color.new(#FFD700, 0) : color.new(#8b949e, 0), text_size=size.small)
+
+    table.cell(dash, 0, 4, "4H Sweep",  text_color=color.new(#FF6D00, 0), text_size=size.small)
+    table.cell(dash, 1, 4, sweptH4SSL ? "4H SSL" : "-", text_color=sweptH4SSL ? color.new(#FF6D00, 0) : color.new(#8b949e, 0), text_size=size.small)
+    table.cell(dash, 2, 4, sweptH4BSL ? "4H BSL" : "-", text_color=sweptH4BSL ? color.new(#FF6D00, 0) : color.new(#8b949e, 0), text_size=size.small)
+
+    table.cell(dash, 0, 5, "1H Sweep",  text_color=color.new(#9C27B0, 0), text_size=size.small)
+    table.cell(dash, 1, 5, sweptH1SSL ? "1H SSL" : "-", text_color=sweptH1SSL ? color.new(#9C27B0, 0) : color.new(#8b949e, 0), text_size=size.small)
+    table.cell(dash, 2, 5, sweptH1BSL ? "1H BSL" : "-", text_color=sweptH1BSL ? color.new(#9C27B0, 0) : color.new(#8b949e, 0), text_size=size.small)
+
+    table.cell(dash, 0, 6, "HTF Conf",  text_color=color.new(#8b949e, 0), text_size=size.small)
+    confBuyTxt  = htfConfBuy  == 3 ? "MAX (3/3)" : htfConfBuy  == 2 ? "HIGH (2/3)" : htfConfBuy  == 1 ? "MED (1/3)" : "-"
+    confSellTxt = htfConfSell == 3 ? "MAX (3/3)" : htfConfSell == 2 ? "HIGH (2/3)" : htfConfSell == 1 ? "MED (1/3)" : "-"
+    confBuyCol  = htfConfBuy  >= 2 ? color.new(#00c853, 0) : htfConfBuy  == 1 ? color.yellow : color.new(#8b949e, 0)
+    confSellCol = htfConfSell >= 2 ? color.new(#ff5252, 0) : htfConfSell == 1 ? color.yellow : color.new(#8b949e, 0)
+    table.cell(dash, 1, 6, confBuyTxt,  text_color=confBuyCol,  text_size=size.small)
+    table.cell(dash, 2, 6, confSellTxt, text_color=confSellCol, text_size=size.small)
+
+    table.cell(dash, 0, 7, "1 Sweep",   text_color=color.new(#8b949e, 0), text_size=size.small)
+    table.cell(dash, 1, 7, step1Buy  ? "15M SSL" : "-", text_color=step1Buy  ? color.new(#00e5ff, 0) : color.new(#8b949e, 0), text_size=size.small)
+    table.cell(dash, 2, 7, step1Sell ? "15M BSL" : "-", text_color=step1Sell ? color.new(#00e5ff, 0) : color.new(#8b949e, 0), text_size=size.small)
+
+    table.cell(dash, 0, 8, "2 In Zone", text_color=color.new(#8b949e, 0), text_size=size.small)
+    table.cell(dash, 1, 8, inBullZone ? (inBullOB ? "OB OK" : "FVG OK") : "-", text_color=inBullZone ? color.new(#00c853, 0) : color.new(#8b949e, 0), text_size=size.small)
+    table.cell(dash, 2, 8, inBearZone ? (inBearOB ? "OB OK" : "FVG OK") : "-", text_color=inBearZone ? color.new(#ff5252, 0) : color.new(#8b949e, 0), text_size=size.small)
+
+    table.cell(dash, 0, 9, "3 Candle",  text_color=color.new(#8b949e, 0), text_size=size.small)
+    table.cell(dash, 1, 9, bullCandle ? "BULL OK" : "-", text_color=bullCandle ? color.new(#00c853, 0) : color.new(#8b949e, 0), text_size=size.small)
+    table.cell(dash, 2, 9, bearCandle ? "BEAR OK" : "-", text_color=bearCandle ? color.new(#ff5252, 0) : color.new(#8b949e, 0), text_size=size.small)
+
+    kzTxt = londonKZ ? "LONDON" : nyKZ ? "NEW YORK" : sb1 or sb2 ? "SLV BULLET" : "OFF HOURS"
+    kzCol = inKZ or sb1 or sb2 ? color.new(#00c853, 0) : color.new(#8b949e, 0)
+    table.cell(dash, 0, 10, "Session",   text_color=color.new(#8b949e, 0), text_size=size.small)
+    table.cell(dash, 1, 10, kzTxt,       text_color=kzCol, text_size=size.small)
+    table.cell(dash, 2, 10, inKZ ? "ACTIVE" : "WAITING", text_color=kzCol, text_size=size.small)
+
+    table.cell(dash, 0, 11, "----------", text_color=color.new(#30363d, 0), text_size=size.tiny)
+    table.cell(dash, 1, 11, "------",     text_color=color.new(#30363d, 0), text_size=size.tiny)
+    table.cell(dash, 2, 11, "------",     text_color=color.new(#30363d, 0), text_size=size.tiny)
+
+    bStatus = buySignal  ? "BUY NOW"  : step1Buy  and inBullZone ? "WAIT CANDLE" : step1Buy  ? "IN SWEEP" : "SCANNING"
+    sStatus = sellSignal ? "SELL NOW" : step1Sell and inBearZone ? "WAIT CANDLE" : step1Sell ? "IN SWEEP" : "SCANNING"
+    bCol    = buySignal  ? color.new(#00c853, 0) : step1Buy  and inBullZone ? color.yellow : step1Buy  ? color.new(#00e5ff, 0) : color.new(#8b949e, 0)
+    sCol    = sellSignal ? color.new(#ff5252, 0) : step1Sell and inBearZone ? color.yellow : step1Sell ? color.new(#00e5ff, 0) : color.new(#8b949e, 0)
+    table.cell(dash, 0, 12, "STATUS",    text_color=color.white,  bgcolor=color.new(#161b22, 0), text_size=size.small)
+    table.cell(dash, 1, 12, bStatus,     text_color=bCol,         bgcolor=color.new(#161b22, 0), text_size=size.small)
+    table.cell(dash, 2, 12, sStatus,     text_color=sCol,         bgcolor=color.new(#161b22, 0), text_size=size.small)
+
+    // Legend row
+    table.cell(dash, 0, 13, "1D=Gold 4H=Org 1H=Pur 15M=Red/Cyn", text_color=color.new(#8b949e, 0), text_size=size.tiny)
+    table.cell(dash, 1, 13, "", text_size=size.tiny)
+    table.cell(dash, 2, 13, "", text_size=size.tiny)
+
+// ================================================================
+//  ALERTS
+// ================================================================
+alertcondition(sw1DSSL,    "1D SSL Swept",  "1D SSL swept - major bull reversal zone")
+alertcondition(sw1DBSL,    "1D BSL Swept",  "1D BSL swept - major bear reversal zone")
+alertcondition(sw4HSSL,    "4H SSL Swept",  "4H SSL swept - intermediate bull zone")
+alertcondition(sw4HBSL,    "4H BSL Swept",  "4H BSL swept - intermediate bear zone")
+alertcondition(sw1HSSL,    "1H SSL Swept",  "1H SSL swept - session bull zone")
+alertcondition(sw1HBSL,    "1H BSL Swept",  "1H BSL swept - session bear zone")
+alertcondition(sweepSSL,   "15M SSL Swept", "15M SSL swept - watch for OB/FVG entry")
+alertcondition(sweepBSL,   "15M BSL Swept", "15M BSL swept - watch for OB/FVG entry")
+alertcondition(buySignal,  "BUY Signal",    "SMC BUY - Sweep + Zone + Candle confirmed!")
+alertcondition(sellSignal, "SELL Signal",   "SMC SELL - Sweep + Zone + Candle confirmed!")

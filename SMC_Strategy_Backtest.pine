@@ -1,0 +1,351 @@
+//@version=6
+strategy("Calisto FX — SMC Backtest [15m]",
+     overlay             = true,
+     max_labels_count    = 500,
+     default_qty_type    = strategy.percent_of_equity,
+     default_qty_value   = 1,
+     commission_type     = strategy.commission.percent,
+     commission_value    = 0.07,
+     slippage            = 2,
+     pyramiding          = 0,
+     calc_on_every_tick  = false)
+
+// ═══════════════════════════════════════════════════════
+//  CALISTO FX — BACKTEST (No visuals — use SMC_Scalper
+//  indicator alongside this for chart drawings)
+//
+//  Signal logic:
+//  STEP 1 → SSL / BSL Sweep
+//  STEP 2 → MSS / CHoCH AFTER sweep
+//  STEP 3 → Price at unmitigated FVG or OB
+// ═══════════════════════════════════════════════════════
+
+// ── INPUTS ──────────────────────────────────────────────
+swingLen   = input.int(10,    "Swing Length",             minval=3,  maxval=50,  group="Structure")
+obLookback = input.int(5,     "OB Lookback",              minval=1,  maxval=20,  group="Signal Logic")
+dispMult   = input.float(1.2, "OB Displacement (ATR x)", minval=0.5,maxval=5.0, step=0.1, group="Signal Logic")
+fvgMinSize = input.float(0.2, "Min FVG Size (ATR x)",    minval=0.1,maxval=3.0, step=0.1, group="Signal Logic")
+fvgDisp    = input.float(0.5, "FVG Displacement (ATR x)",minval=0.2,maxval=3.0, step=0.1, group="Signal Logic")
+sweepWin   = input.int(75,    "Sweep Expiry (bars)",      minval=10, maxval=200,            group="Signal Logic")
+slAtrMult  = input.float(0.2, "SL Buffer (ATR x)",       minval=0.1,maxval=1.0, step=0.1, group="Risk")
+tpAtrFall  = input.float(3.0, "TP Fallback (ATR x)",     minval=1.0,maxval=10.0,step=0.5, group="Risk")
+
+// ── ATR ─────────────────────────────────────────────────
+atr = ta.atr(14)
+
+// ═══════════════════════════════════════════════════════
+//  MARKET STRUCTURE — BOS / MSS / CHoCH
+// ═══════════════════════════════════════════════════════
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low,  swingLen, swingLen)
+
+var float lastHH   = na
+var float lastLL   = na
+var bool  bullBias = true
+
+if not na(ph)
+    lastHH := ph
+if not na(pl)
+    lastLL := pl
+
+bosUp     = not na(lastHH) and close > lastHH and close[1] <= lastHH
+bosDown   = not na(lastLL) and close < lastLL and close[1] >= lastLL
+chochUp   = not na(lastHH) and close > lastHH and not bullBias
+chochDown = not na(lastLL) and close < lastLL and bullBias
+
+if bosUp or chochUp
+    bullBias := true
+if bosDown or chochDown
+    bullBias := false
+
+// ═══════════════════════════════════════════════════════
+//  BSL / SSL (for sweep detection only — no drawings)
+// ═══════════════════════════════════════════════════════
+liqPH = ta.pivothigh(high, swingLen, swingLen)
+liqPL = ta.pivotlow(low,  swingLen, swingLen)
+
+var float bslLevel = na
+var float sslLevel = na
+
+if not na(liqPH)
+    bslLevel := liqPH
+if not na(liqPL)
+    sslLevel := liqPL
+
+// ═══════════════════════════════════════════════════════
+//  STEP 1 — LIQUIDITY SWEEP (logic only, no label)
+// ═══════════════════════════════════════════════════════
+sweepHigh = not na(liqPH) and high[swingLen] > liqPH and close[swingLen] < liqPH
+sweepLow  = not na(liqPL) and low[swingLen]  < liqPL and close[swingLen] > liqPL
+
+var bool step1Buy     = false
+var bool step1Sell    = false
+var int  step1BuyBar  = 0
+var int  step1SellBar = 0
+
+if sweepLow
+    step1Buy     := true
+    step1BuyBar  := bar_index[swingLen]
+
+if sweepHigh
+    step1Sell     := true
+    step1SellBar  := bar_index[swingLen]
+
+// Expire sweep after window
+if bar_index - step1BuyBar  > sweepWin
+    step1Buy  := false
+if bar_index - step1SellBar > sweepWin
+    step1Sell := false
+
+// ═══════════════════════════════════════════════════════
+//  STEP 2 — MSS / CHoCH AFTER SWEEP (sequential)
+// ═══════════════════════════════════════════════════════
+var bool step2Buy     = false
+var bool step2Sell    = false
+var int  step2BuyBar  = 0
+var int  step2SellBar = 0
+
+if chochUp and step1Buy
+    step2Buy     := true
+    step2BuyBar  := bar_index
+    step1Buy     := false
+
+if chochDown and step1Sell
+    step2Sell     := true
+    step2SellBar  := bar_index
+    step1Sell     := false
+
+if bar_index - step2BuyBar  > sweepWin
+    step2Buy  := false
+if bar_index - step2SellBar > sweepWin
+    step2Sell := false
+
+// ═══════════════════════════════════════════════════════
+//  ORDER BLOCKS — logic only, no boxes drawn
+// ═══════════════════════════════════════════════════════
+var float bullOBH   = na
+var float bullOBL   = na
+var box   bullOBBox = na
+
+var float bearOBH   = na
+var float bearOBL   = na
+var box   bearOBBox = na
+
+strongBull = (close - open) > atr * dispMult and close > open
+strongBear = (open - close) > atr * dispMult and close < open
+
+// Mitigate Bull OB
+if not na(bullOBL) and close < bullOBL
+    bullOBH := na
+    bullOBL := na
+
+// Mitigate Bear OB
+if not na(bearOBH) and close > bearOBH
+    bearOBH := na
+    bearOBL := na
+
+// New Bull OB
+if strongBull
+    foundBull = false
+    for i = 1 to obLookback
+        if not foundBull and close[i] < open[i]
+            foundBull := true
+            bullOBH   := high[i]
+            bullOBL   := low[i]
+
+// New Bear OB
+if strongBear
+    foundBear = false
+    for i = 1 to obLookback
+        if not foundBear and close[i] > open[i]
+            foundBear := true
+            bearOBH   := high[i]
+            bearOBL   := low[i]
+
+// ═══════════════════════════════════════════════════════
+//  FAIR VALUE GAPS — logic only, no boxes drawn
+// ═══════════════════════════════════════════════════════
+var float bullFVGH = na
+var float bullFVGL = na
+var float bearFVGH = na
+var float bearFVGL = na
+
+midBullDisp = close[1] > open[1] and (close[1] - open[1]) > atr * fvgDisp
+midBearDisp = close[1] < open[1] and (open[1] - close[1]) > atr * fvgDisp
+bullFVGSz   = low    - high[2]
+bearFVGSz   = low[2] - high
+
+bullFVG = low > high[2]  and bullFVGSz > atr * fvgMinSize and midBullDisp and bullBias
+bearFVG = high < low[2]  and bearFVGSz > atr * fvgMinSize and midBearDisp and not bullBias
+
+// Mitigate FVGs
+if not na(bullFVGL) and close < bullFVGL
+    bullFVGH := na
+    bullFVGL := na
+
+if not na(bearFVGH) and close > bearFVGH
+    bearFVGH := na
+    bearFVGL := na
+
+// New FVGs
+if bullFVG
+    bullFVGH := low
+    bullFVGL := high[2]
+
+if bearFVG
+    bearFVGH := low[2]
+    bearFVGL := high
+
+// ═══════════════════════════════════════════════════════
+//  PREMIUM / DISCOUNT
+// ═══════════════════════════════════════════════════════
+rangeH = not na(lastHH) ? lastHH : ta.highest(high, 50)
+rangeL = not na(lastLL) ? lastLL : ta.lowest(low,  50)
+eq     = (rangeH + rangeL) / 2
+disc   = close < eq
+prem   = close > eq
+
+// ═══════════════════════════════════════════════════════
+//  STEP 3 — POINT OF INTEREST
+// ═══════════════════════════════════════════════════════
+atBullOB  = not na(bullOBH) and not na(bullOBL) and low  <= bullOBH and close >= bullOBL
+atBullFVG = not na(bullFVGH) and not na(bullFVGL) and low <= bullFVGH and close >= bullFVGL
+atBullPOI = atBullOB or atBullFVG
+
+atBearOB  = not na(bearOBH) and not na(bearOBL) and high >= bearOBL  and close <= bearOBH
+atBearFVG = not na(bearFVGH) and not na(bearFVGL) and high >= bearFVGL and close <= bearFVGH
+atBearPOI = atBearOB or atBearFVG
+
+// ═══════════════════════════════════════════════════════
+//  CALISTO FX SIGNAL — ALL 3 STEPS MANDATORY
+// ═══════════════════════════════════════════════════════
+buySignal  = bullBias and step2Buy  and atBullPOI and barstate.isconfirmed
+sellSignal = not bullBias and step2Sell and atBearPOI and barstate.isconfirmed
+
+// ═══════════════════════════════════════════════════════
+//  SL / TP CALCULATION
+// ═══════════════════════════════════════════════════════
+slBull = atBullOB  ? bullOBL - atr * slAtrMult :
+         not na(bullFVGL) ? bullFVGL - atr * slAtrMult : close - atr * 1.5
+
+slBear = atBearOB  ? bearOBH + atr * slAtrMult :
+         not na(bearFVGH) ? bearFVGH + atr * slAtrMult : close + atr * 1.5
+
+// ═══════════════════════════════════════════════════════
+//  STRATEGY ENTRIES & EXITS
+// ═══════════════════════════════════════════════════════
+if buySignal and strategy.position_size == 0
+    step2Buy := false
+    slPr  = math.round(slBull, 2)
+    tpPr  = not na(bslLevel) ? math.round(bslLevel, 2) : math.round(close + atr * tpAtrFall, 2)
+    rr    = math.round((tpPr - close) / math.max(close - slPr, 0.0001), 1)
+
+    strategy.entry("BUY", strategy.long)
+    strategy.exit("BUY Exit", "BUY", stop=slPr, limit=tpPr)
+
+    label.new(bar_index, low - atr * 2.5,
+         "▲  BUY\n" +
+         "Entry  " + str.tostring(math.round(close, 2)) +
+         "\nSL      "  + str.tostring(slPr) +
+         "\nTP      "  + str.tostring(tpPr) +
+         "\nRR   1:" + str.tostring(rr),
+         color=color.new(#00c853, 0), textcolor=color.white,
+         style=label.style_label_up, size=size.normal)
+
+if sellSignal and strategy.position_size == 0
+    step2Sell := false
+    slPr  = math.round(slBear, 2)
+    tpPr  = not na(sslLevel) ? math.round(sslLevel, 2) : math.round(close - atr * tpAtrFall, 2)
+    rr    = math.round((close - tpPr) / math.max(slPr - close, 0.0001), 1)
+
+    strategy.entry("SELL", strategy.short)
+    strategy.exit("SELL Exit", "SELL", stop=slPr, limit=tpPr)
+
+    label.new(bar_index, high + atr * 2.5,
+         "▼  SELL\n" +
+         "Entry  " + str.tostring(math.round(close, 2)) +
+         "\nSL      "  + str.tostring(slPr) +
+         "\nTP      "  + str.tostring(tpPr) +
+         "\nRR   1:" + str.tostring(rr),
+         color=color.new(#d50000, 0), textcolor=color.white,
+         style=label.style_label_down, size=size.normal)
+
+// ═══════════════════════════════════════════════════════
+//  SIGNAL ARROWS
+// ═══════════════════════════════════════════════════════
+plotshape(buySignal,  "BUY",  shape.triangleup,   location.belowbar, color.new(#00c853, 0), size=size.large)
+plotshape(sellSignal, "SELL", shape.triangledown, location.abovebar, color.new(#d50000, 0), size=size.large)
+
+// ═══════════════════════════════════════════════════════
+//  DASHBOARD — Clean backtest stats
+// ═══════════════════════════════════════════════════════
+c1buy  = bullBias
+c2buy  = step1Buy or step2Buy
+c3buy  = step2Buy
+c4buy  = atBullPOI
+c1sell = not bullBias
+c2sell = step1Sell or step2Sell
+c3sell = step2Sell
+c4sell = atBearPOI
+
+var table dash = table.new(position.top_right, 3, 9,
+     bgcolor=color.new(#0d1117, 0),
+     border_color=color.new(color.gray, 50),
+     border_width=1,
+     frame_color=color.new(color.gray, 30),
+     frame_width=1)
+
+if barstate.islast
+    table.cell(dash, 0, 0, "CALISTO FX BT",
+         text_color=color.white, bgcolor=color.new(#1a1f2e, 0), text_size=size.small)
+    table.cell(dash, 1, 0, "BUY",
+         text_color=color.lime,  bgcolor=color.new(#1a1f2e, 0), text_size=size.small)
+    table.cell(dash, 2, 0, "SELL",
+         text_color=color.red,   bgcolor=color.new(#1a1f2e, 0), text_size=size.small)
+
+    table.cell(dash, 0, 1, "① Bias",      text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 1, c1buy  ? "BULL ✔" : "✘", text_color=c1buy  ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 2, 1, c1sell ? "BEAR ✔" : "✘", text_color=c1sell ? color.lime : color.red, text_size=size.small)
+
+    table.cell(dash, 0, 2, "② Sweep",     text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 2, c2buy  ? "SSL ✔" : "✘", text_color=c2buy  ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 2, 2, c2sell ? "BSL ✔" : "✘", text_color=c2sell ? color.lime : color.red, text_size=size.small)
+
+    table.cell(dash, 0, 3, "③ MSS",       text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 3, c3buy  ? "BULL ✔" : "✘", text_color=c3buy  ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 2, 3, c3sell ? "BEAR ✔" : "✘", text_color=c3sell ? color.lime : color.red, text_size=size.small)
+
+    table.cell(dash, 0, 4, "④ OB / FVG",  text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 4, c4buy  ? "HIT ✔" : "✘", text_color=c4buy  ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 2, 4, c4sell ? "HIT ✔" : "✘", text_color=c4sell ? color.lime : color.red, text_size=size.small)
+
+    table.cell(dash, 0, 5, "────────",    text_color=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(dash, 1, 5, "─────",       text_color=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(dash, 2, 5, "─────",       text_color=color.new(color.gray, 50), text_size=size.tiny)
+
+    // Live trade status
+    inTrade  = strategy.position_size != 0
+    posText  = inTrade ? (strategy.position_size > 0 ? "▲ LONG" : "▼ SHORT") : "FLAT"
+    posCol   = inTrade ? (strategy.position_size > 0 ? color.lime : color.red) : color.gray
+    table.cell(dash, 0, 6, "Position",    text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 6, posText,       text_color=posCol,       text_size=size.small)
+    table.cell(dash, 2, 6, "",            text_color=color.gray,   text_size=size.small)
+
+    // Win rate from strategy
+    totalTrades = strategy.closedtrades
+    winTrades   = strategy.wintrades
+    winRate     = totalTrades > 0 ? math.round(winTrades / totalTrades * 100, 1) : 0.0
+    wrCol       = winRate >= 60 ? color.lime : winRate >= 45 ? color.yellow : color.red
+    table.cell(dash, 0, 7, "Win Rate",    text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 7, str.tostring(winRate) + "%  (" + str.tostring(winTrades) + "/" + str.tostring(totalTrades) + ")",
+         text_color=wrCol, text_size=size.small)
+    table.cell(dash, 2, 7, "",            text_color=color.gray,   text_size=size.small)
+
+    // Signal
+    bSig = buySignal  ? "▲ BUY"  : c3buy  ? "NEAR"  : "WAIT"
+    sSig = sellSignal ? "▼ SELL" : c3sell ? "NEAR"  : "WAIT"
+    bCol = buySignal  ? color.lime   : c3buy  ? color.yellow : color.gray
+    sCol = sellSignal ? color.red    : c3sell ? color.yellow : color.gray
+    table.cell(dash, 0, 8, "SIGNAL",      text_color=color.white, bgcolor=color.new(#1a1f2e, 0), text_size=size.small)
+    table.cell(dash, 1, 8, bSig,          text_color=bCol,        bgcolor=color.new(#1a1f2e, 0), text_size=size.small)
+    table.cell(dash, 2, 8, sSig,          text_color=sCol,        bgcolor=color.new(#1a1f2e, 0), text_size=size.small)
