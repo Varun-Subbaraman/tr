@@ -1,0 +1,87 @@
+PART 1 — Download the Repo
+Option A — Easy (No Git Needed)
+Go to: https://github.com/Varun-Subbaraman/tr
+Click the green < > Code button
+Click Download ZIP
+Extract the ZIP to your Desktop
+You'll have a folder called tr-main with all the files
+Option B — Using Git (if installed)
+Open Command Prompt
+Navigate to where you want it:
+cd C:\Users\2484958\Desktop
+Clone the repo:
+git clone https://github.com/Varun-Subbaraman/tr.git
+You'll have a folder called tr with all the files
+PART 2 — Install Python (One-Time)
+Go to https://www.python.org/downloads/
+Click the big yellow Download Python button
+Run the installer
+⚠️ CRITICAL: Tick the checkbox "Add python.exe to PATH" at the bottom
+Click Install Now
+Wait 1-2 minutes
+Verify it worked:
+
+Press Windows + R, type cmd, press Enter
+Type: python --version
+You should see: Python 3.x.x
+PART 3 — Run the Python Trading Agent
+First Time Setup + Run
+Open the tr-main (or tr) folder
+Double-click SETUP_AND_RUN.bat
+This will:
+
+Install required Python packages (yfinance, pandas, colorama, openpyxl) — takes ~30 seconds
+Launch the trading agent automatically
+Ask for your account balance on first run
+After First Run
+Every subsequent time, just double-click SETUP_AND_RUN.bat again. It skips installation (already installed) and goes straight to launching.
+
+To Stop the Agent
+Press Ctrl + C in the black terminal window.
+
+PART 4 — Use the TradingView Indicators
+Add the Live Indicator
+Open https://www.tradingview.com (login to your account)
+Open the XAUUSD chart on 15M timeframe
+Click Pine Editor at the bottom of the screen
+Click Open → New Indicator (clear the default code)
+Open SMC_Scalper.pine in Notepad
+Copy ALL the text → paste into Pine Editor
+Click Save (give it any name)
+Click Add to chart
+Add the Strategy Backtester
+In Pine Editor, click Open → New Strategy
+Open SMC_Strategy_Backtest.pine in Notepad
+Copy ALL the text → paste into Pine Editor
+Click Save → Add to chart
+Click the Strategy Tester tab at the bottom to see historical performance
+PART 5 — Configure Your Real Balance
+Before running with real-money settings:
+
+Open trading_agent.py in Notepad
+Find this section near the top:
+CONFIG = {
+    "starting_balance"   : 10000.00,   # CHANGE THIS
+    "base_risk_pct"      : 0.01,       # 1% risk per trade
+    "max_daily_loss_pct" : 0.02,       # 2% max daily loss
+    "max_daily_trades"   : 3,          # max 3 trades/day
+Change starting_balance to your real balance
+Save the file
+Run again
+OR — on first run, the agent asks for your balance and saves it automatically to agent_state.json.
+
+PART 6 — Files That Get Created Automatically
+After the agent runs, these files appear in the folder:
+
+File	What It Is
+trades_log.xlsx	Every trade logged — open in Excel
+agent_state.json	Your balance, P&L, win rate (auto-saved)
+Quick Troubleshooting
+Problem	Solution
+"python is not recognized"	Reinstall Python with "Add to PATH" ticked
+"pip is not recognized"	Same as above
+".bat file flashes and closes"	Right-click .bat → Run as administrator
+"No price data" error	Check internet connection
+Indicator not on chart	In TradingView, click directly on the price pane before clicking "Add to chart"
+Add a README to Your Repo (Recommended)
+Since the README is empty, want me to generate a proper README.md you can upload to the repo so others (or future-you) understand it? Just say yes and I'll write it.
